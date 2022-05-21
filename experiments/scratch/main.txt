@@ -1,0 +1,158 @@
+
+def train(model: VAEGCN,
+          training_data: Dataset,
+          device: torch.device,
+          num_epochs: int = 40) -> torch.nn.Module:
+    """
+    Train the model for num_epochs epochs on the given device using the given data_handling.
+
+    Right now a lot of stuff is hardcoded for this specific model / dataset.
+    Most importantly only the first column of the y target matrix is used.
+
+    :param model: The model to train.
+    :param training_data: The training data_handling to use.
+    :param device: The device to train on.
+    :param num_epochs: The number of epochs to train for.
+    :return: The trained model.
+    """
+    max_num_nodes = 29
+    batch_size = 32
+    train_loader = DataLoader(training_data, batch_size=batch_size, shuffle=True, drop_last=True)
+    optimizer = torch.optim.Adam(model.parameters())
+
+    model.train()
+    for epoch in range(num_epochs):
+        epoch_loss = 0.0
+        for data in train_loader:
+            x = data.x[:, 0:5].to(device)
+            edge_index = data.edge_index.to(device)
+            edge_attr = data.edge_attr.to(device)
+            batch = data.batch.to(device)
+            z_mu, z_log_var, z_sample = model.encode(x, edge_index, edge_attr, batch)
+            reconstruction_nodes, reconstruction_edges = model.decode(z_sample)
+            x, real_data_indices = to_dense_batch(x, batch, max_num_nodes=max_num_nodes)
+            padding_indicators = torch.zeros(batch_size, max_num_nodes, 1)
+            padding_indicators[~real_data_indices] = 1
+            x = torch.cat([x, padding_indicators], 2)
+            adj = to_dense_adj(edge_index, batch, edge_attr, max_num_nodes=max_num_nodes)
+            padding_indicators = padding_indicators.unsqueeze(2).expand(-1, -1, max_num_nodes, -1)
+            adj = torch.cat([adj, padding_indicators], 3)
+            # x = torch.flatten(x, 1)
+            # adj = torch.flatten(adj, 1)
+            # real = torch.cat([x, adj], 1)
+            # print(real.shape)
+            adj = torch.argmax(adj, dim=-1)
+            x = torch.argmax(x, dim=-1)
+            reconstruction_nodes = reconstruction_nodes.reshape(batch_size, -1, max_num_nodes)
+            reconstruction_edges = reconstruction_edges.reshape(batch_size, -1, max_num_nodes, max_num_nodes)
+            bce_loss_nodes = F.cross_entropy(reconstruction_nodes, x, reduction='sum')
+            bce_loss_edges = F.cross_entropy(reconstruction_edges, adj, reduction='sum')
+            kld_loss = -0.5 * torch.sum(1 + z_log_var - z_mu.pow(2) - z_log_var.exp())
+            total_loss = bce_loss_nodes + bce_loss_edges + kld_loss
+            # for i in range(5):
+            #     model.discriminator.train()
+            #     discriminator_optimizer.zero_grad()
+            #     discriminator_loss = model.discriminator_loss(z)
+            #     discriminator_loss.backward()
+            #     discriminator_optimizer.step()
+            # loss = model.recon_loss(z, edge_index)
+            # loss = loss + (1 / data.num_nodes) * model.kl_loss()
+            total_loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            epoch_loss += total_loss.item()
+        print('{epoch} loss: {loss}'.format(epoch=epoch, loss=(epoch_loss / len(train_loader))))
+    return model
+
+
+def create_embeddings(model: torch.nn.Module,
+                      dataset: Dataset,
+                      device: torch.device) -> Tuple[np.ndarray]:
+    """
+    Creates an embedding from data_handling by forward pass through a trained model that returns an embedding
+    as its second output.
+    :param model: The trained model that ouputs embeddings.
+    :param dataset: The dataset to embed.
+    :param device: The device to do the forward pass on.
+    :return: The embeddings and their corresponding cids.
+    """
+    data_loader = DataLoader(dataset, batch_size=32, shuffle=True, drop_last=True)
+    all_embeddings = []
+    reals = []
+    max_num_nodes = 29
+    for batch_idx, data in enumerate(data_loader):
+        if batch_idx < 641:
+            x = data.x[:, 0:5].to(device)
+            edge_index = data.edge_index.to(device)
+            edge_attr = data.edge_attr.to(device)
+            batch = data.batch.to(device)
+
+            z_mu, z_log_var, z_sample = model.encode(x, edge_index, edge_attr, batch)
+            reconstruction_nodes, reconstruction_edges = model.decode(z_sample)
+            reconstruction_nodes = F.softmax(reconstruction_nodes.reshape(-1, max_num_nodes), 0)
+            reconstruction_edges = F.softmax(reconstruction_edges.reshape(-1, max_num_nodes,
+                                                                max_num_nodes), 0)
+            reconstruction_edges = torch.argmax(reconstruction_edges.permute(1, 2, 0), dim=-1).detach().numpy()
+            reconstruction_nodes = torch.argmax(reconstruction_nodes.permute(1, 0), dim=-1).detach().numpy()
+
+            mol = matrices2mol(reconstruction_nodes, reconstruction_edges)
+            all_embeddings.append(mol)
+
+            x, real_data_indices = to_dense_batch(x, batch, max_num_nodes=max_num_nodes)
+            padding_indicators = torch.zeros(1, max_num_nodes, 1)
+            padding_indicators[~real_data_indices] = 1
+            x = torch.cat([x, padding_indicators], 2)
+            adj = to_dense_adj(edge_index, batch, edge_attr, max_num_nodes=max_num_nodes)
+            padding_indicators = padding_indicators.unsqueeze(2).expand(-1, -1, max_num_nodes, -1)
+            adj = torch.cat([adj, padding_indicators], 3)
+            # x = torch.flatten(x, 1)
+            # adj = torch.flatten(adj, 1)
+            # real = torch.cat([x, adj], 1)
+            # print(real.shape)
+            adj = torch.argmax(adj, dim=-1).detach().numpy()
+            x = torch.argmax(x, dim=-1).detach().numpy()
+            mol = matrices2mol(x[0], adj[0])
+            reals.append(mol)
+
+
+
+        # print(blah)
+        # print(hi)
+        # all_embeddings.append(z.detach().cpu().numpy())
+    return all_embeddings, reals
+
+def main():
+# trainer.fit(LitAutoEncoder(29, 32, 5, 4, 32, 32, 29 * 6, 29 * 29 * 5), datamodule=dataset)
+    # i = 0
+    # for idx_r in range(29):
+    #     for idx_c in range(idx_r):
+    #         print("idxs: {}, {}.".format(idx_r, idx_c))
+    #         print(i)
+    #         i += 1
+
+
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # model = VAEGCN(Encoder(node_in_channels=5,
+    #                        edge_in_channels=4,
+    #                        hidden_channels=32,
+    #                        out_channels=32),
+    #                Decoder(in_channels=32,
+    #                        hidden_channels=32,
+    #                        node_out_channels=29 * 6,
+    #                        edge_out_channels=5*29*29),
+    #                Discriminator(in_channels=32,
+    #                              hidden_channels=64,
+    #                              out_channels=32))
+
+    # model = train(model, dataset.train, device)
+    # torch.save(model, SAVED_MODEL_PATH)
+
+    # model = torch.load(SAVED_MODEL_PATH)
+    # mols, data = create_embeddings(model, dataset.train, device)
+    #
+    # m0, m1 = all_scores(mols, data, norm=True)
+    # m0 = {k: np.array(v)[np.nonzero(v)].mean() for k, v in m0.items()}
+    # m0.update(m1)
+    # print(m0)
+    # np.savez(SAVED_EMBEDDINGS_PATH, embedding=embeddings, cids=cids)

@@ -1,0 +1,50 @@
+
+class VAEGCN(torch.nn.Module):
+    def __init__(self,
+                 encoder,
+                 decoder,
+                 descriminator):
+        super(VAEGCN, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        # self.descriminator = descriminator
+
+    def encode(self, x, edge_index, edge_weight, batch):
+        z_mu, z_log_var = self.encoder(x, edge_index, edge_weight, batch)
+        z_sample = self._sample(z_mu, z_log_var)
+        return z_mu, z_log_var, z_sample
+
+    def decode(self, z_sample):
+        return self.decoder(z_sample)
+
+    def train(self):
+        self.encoder.train()
+        self.decoder.train()
+        # self.d.train()
+
+    def _sample(self, z_mu, z_log_var):
+        z_std = torch.exp(0.5 * z_log_var)
+        epsilon = torch.randn_like(z_mu)
+        return z_mu + z_std * epsilon
+
+
+    def training_step(self, batch: Batch, batch_idx: int) -> Tensor:
+        pred_nodes, pred_edges, z_mu, z_log_var = self.run_vae(batch)
+        pred_nodes = pad_t(pred_nodes, dim=2).reshape(self.batch_size, -1, self.max_nodes_in_graph)
+        pred_edges = pad_t(pred_edges, dim=2).reshape(self.batch_size, -1, self.max_edges_in_graph)
+
+        target_nodes, target_edges = convert_to_dense(
+            batch, self.max_nodes_in_graph, self.batch_size)
+        target_nodes = torch.argmax(target_nodes, dim=-1)
+        target_edges = torch.argmax(target_edges, dim=-1)
+
+        bce_loss_nodes = F.cross_entropy(pred_nodes, target_nodes, reduction='sum')
+        bce_loss_edges = F.cross_entropy(pred_edges, target_edges, reduction='sum')
+        bce_loss = bce_loss_nodes + bce_loss_edges
+        kld_loss = -0.5 * torch.sum(1 + z_log_var - z_mu.pow(2) - z_log_var.exp())
+        loss = bce_loss + kld_loss
+
+        self.log('bce_loss', bce_loss, on_epoch=True, prog_bar=True)
+        self.log('kld_loss', kld_loss, on_epoch=True, prog_bar=True)
+        self.log('loss', loss, on_epoch=True, prog_bar=True)
+        return loss
